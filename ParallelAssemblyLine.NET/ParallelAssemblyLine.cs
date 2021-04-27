@@ -2,7 +2,7 @@
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
 
-namespace ParallelAssemblyLine.NET
+namespace ParallelAssemblyLineNET
 {
 
     public class ParallelAssemblyLineOptions
@@ -15,8 +15,20 @@ namespace ParallelAssemblyLine.NET
     /// </summary>
     /// <typeparam name="TIn">The datatype going INTO the assembly line</typeparam>
     /// <typeparam name="TOut">The datatype LEAVING the assembly line</typeparam>
-    public static class ParallelAssemblyLine<TIn, TOut> 
+    public static class ParallelAssemblyLine 
     {
+
+        public class FeederResult<T> // Nullable wrapper for any data type.
+        {
+            public T data = default(T);
+
+            public FeederResult(T dataA){
+                data = dataA;
+            }
+
+            public static implicit operator T(FeederResult<T> d) => d.data;
+            public static implicit operator FeederResult<T>(T data) => new FeederResult<T>(data);
+        }
 
         // 
         /// <summary>
@@ -26,11 +38,13 @@ namespace ParallelAssemblyLine.NET
         /// <param name="chewer">The chewer receives the data that the feeder provided, but multiple chewers work on multiple items in parallel.</param>
         /// <param name="digester">The digester receives, in sequential and single-threaded form, the output of the chewers. It can for example write this data sequentially into a file stream.</param>
         /// <param name="options">Options to define finer points of the behavior of the behavior of this function</param>
-        public static void Assemble(Func<Int64,TIn> feeder,Func<TIn,TOut> chewer, Action<TOut> digester, ParallelAssemblyLineOptions options = null)
+        public static void Assemble<TIn, TOut>(Func<Int64,FeederResult<TIn>> feeder,Func<TIn,Int64,TOut> chewer, Action<TOut,Int64> digester, ParallelAssemblyLineOptions options = null)
         {
+
+
             int threadCount = Environment.ProcessorCount;
             int bufferSize = threadCount * 2;
-            int mainLoopTimeOut = 500; // 500 ms
+            int mainLoopTimeOut = 100; // 1 ms
 
             ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>();
             ConcurrentDictionary<Int64, bool> threadsFinished = new ConcurrentDictionary<long, bool>();
@@ -38,9 +52,15 @@ namespace ParallelAssemblyLine.NET
 
             Int64 nextToReadIndex = 0;
             Int64 nextToDigestIndex = 0;
-            bool allDataProcessed = false;
-            while (!allDataProcessed)
+            bool allDataFed = false;
+            bool allDataDigested = false;
+            while (!allDataDigested)
             {
+                if (processedData.Count ==0 && threadsRunning.Count == 0 && allDataFed)
+                {
+                    allDataDigested = true;
+                    break;
+                }
 
                 bool noMoreDataForWriting = false;
                 while (!noMoreDataForWriting && processedData.Count>0)
@@ -51,16 +71,8 @@ namespace ParallelAssemblyLine.NET
                         bool success =  processedData.TryRemove(nextToDigestIndex, out resultForDigestion);
                         if (success)
                         {
-                            if(resultForDigestion == null)
-                            {
-                                allDataProcessed = true; 
-                                noMoreDataForWriting = true;
-                            } else
-                            {
-
-                                digester(resultForDigestion);
-                                nextToDigestIndex++;
-                            }
+                            digester(resultForDigestion, nextToDigestIndex);
+                            nextToDigestIndex++;
                         } else
                         {
                             noMoreDataForWriting = true;
@@ -74,15 +86,22 @@ namespace ParallelAssemblyLine.NET
                 }
 
                 // Only spawn new threads if buffer isn't full and full count of threads to run isn't exhausted.
-                while(threadsRunning.Count < threadCount && processedData.Count < bufferSize)
+                while(!allDataFed && threadsRunning.Count < threadCount && processedData.Count < bufferSize)
                 {
-                    TIn inputData = feeder(nextToReadIndex);
+                    FeederResult<TIn> inputData = feeder(nextToReadIndex);
+
+                    if(inputData == null)
+                    {
+                        allDataFed = true;
+                        break;
+                    }
 
                     threadsRunning.TryAdd(nextToReadIndex, true);
 
                     Int64 localIndex = nextToReadIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
                     _ = Task.Run(()=> {
-                        TOut processedDataHere = chewer(inputData);
+                        TOut processedDataHere = chewer(inputData, localIndex);
+                        inputData = null;
                         bool success = false;
                         while (!success)
                         {
@@ -107,5 +126,6 @@ namespace ParallelAssemblyLine.NET
                 System.Threading.Thread.Sleep(mainLoopTimeOut);
             }
         }
+
     }
 }
