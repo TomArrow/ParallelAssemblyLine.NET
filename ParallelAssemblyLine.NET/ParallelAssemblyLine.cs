@@ -15,7 +15,7 @@ namespace ParallelAssemblyLine.NET
     /// </summary>
     /// <typeparam name="TIn">The datatype going INTO the assembly line</typeparam>
     /// <typeparam name="TOut">The datatype LEAVING the assembly line</typeparam>
-    public static class ParallelAssemblyLine<TIn, TOut>
+    public static class ParallelAssemblyLine<TIn, TOut> 
     {
 
         // 
@@ -34,11 +34,12 @@ namespace ParallelAssemblyLine.NET
 
             ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>();
             ConcurrentDictionary<Int64, bool> threadsFinished = new ConcurrentDictionary<long, bool>();
+            ConcurrentDictionary<Int64, bool> threadsRunning = new ConcurrentDictionary<long, bool>();
 
             Int64 nextToReadIndex = 0;
             Int64 nextToDigestIndex = 0;
-            Int64 threadsRunning = 0;
-            while (true)
+            bool allDataProcessed = false;
+            while (!allDataProcessed)
             {
 
                 bool noMoreDataForWriting = false;
@@ -50,28 +51,54 @@ namespace ParallelAssemblyLine.NET
                         bool success =  processedData.TryRemove(nextToDigestIndex, out resultForDigestion);
                         if (success)
                         {
+                            if(resultForDigestion == null)
+                            {
+                                allDataProcessed = true; 
+                                noMoreDataForWriting = true;
+                            } else
+                            {
 
-                            digester(resultForDigestion);
-                            nextToDigestIndex++;
+                                digester(resultForDigestion);
+                                nextToDigestIndex++;
+                            }
                         } else
                         {
                             noMoreDataForWriting = true;
                         }
 
                     }
+                    else
+                    {
+                        noMoreDataForWriting = true;
+                    }
                 }
 
                 // Only spawn new threads if buffer isn't full and full count of threads to run isn't exhausted.
-                while(threadsRunning < threadCount && processedData.Count < bufferSize)
+                while(threadsRunning.Count < threadCount && processedData.Count < bufferSize)
                 {
                     TIn inputData = feeder(nextToReadIndex);
+
+                    threadsRunning.TryAdd(nextToReadIndex, true);
 
                     Int64 localIndex = nextToReadIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
                     _ = Task.Run(()=> {
                         TOut processedDataHere = chewer(inputData);
-                        processedData.TryAdd(localIndex, processedDataHere);
-                        processedDataHere = default(TOut);
-                        threadsFinished.TryAdd(localIndex, true);
+                        bool success = false;
+                        while (!success)
+                        {
+                            success = processedData.TryAdd(localIndex, processedDataHere);
+                        }
+                        processedDataHere = default(TOut); 
+                        success = false;
+                        while (!success)
+                        {
+                            success = threadsFinished.TryAdd(localIndex, true);
+                        }
+                        success = false;
+                        while (!success)
+                        {
+                            success = threadsRunning.TryRemove(localIndex, out _);
+                        }
                     });
 
                     nextToReadIndex++;
