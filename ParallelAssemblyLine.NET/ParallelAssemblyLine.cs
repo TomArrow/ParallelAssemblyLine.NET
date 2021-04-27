@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace ParallelAssemblyLineNET
@@ -44,11 +45,11 @@ namespace ParallelAssemblyLineNET
 
             int threadCount = Environment.ProcessorCount;
             int bufferSize = threadCount * 2;
-            int mainLoopTimeOut = 100; // 1 ms
 
-            ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>();
-            ConcurrentDictionary<Int64, bool> threadsFinished = new ConcurrentDictionary<long, bool>();
-            ConcurrentDictionary<Int64, bool> threadsRunning = new ConcurrentDictionary<long, bool>();
+            ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>(); // This is the buffer for the processed data. We need to buffer because it might not get finished in correct order
+            ConcurrentDictionary<Int64, bool> threadsFinished = new ConcurrentDictionary<long, bool>(); // A dictionary of threads that have finished working, indexed by the iterator.
+            ConcurrentDictionary<Int64, bool> threadsRunning = new ConcurrentDictionary<long, bool>(); // A dictionary of threads that are still potentially running, indexed by the iterator.
+            ConcurrentDictionary<Int64, Task> runningTasks = new ConcurrentDictionary<long, Task>(); // A dictionary of Tasks that may or may not still be running. Necessary to replace Thread.Sleep() with Task.WaitAny()
 
             Int64 nextToReadIndex = 0;
             Int64 nextToDigestIndex = 0;
@@ -56,6 +57,7 @@ namespace ParallelAssemblyLineNET
             bool allDataDigested = false;
             while (!allDataDigested)
             {
+
                 if (processedData.Count ==0 && threadsRunning.Count == 0 && allDataFed)
                 {
                     allDataDigested = true;
@@ -96,10 +98,15 @@ namespace ParallelAssemblyLineNET
                         break;
                     }
 
-                    threadsRunning.TryAdd(nextToReadIndex, true);
+                    bool successOuter = false;
+                    while (!successOuter)
+                    {
+                        successOuter = threadsRunning.TryAdd(nextToReadIndex, true);
+                    }
+                    
 
                     Int64 localIndex = nextToReadIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
-                    _ = Task.Run(()=> {
+                    Task thisTask = Task.Run(()=> {
                         TOut processedDataHere = chewer(inputData, localIndex);
                         inputData = null;
                         bool success = false;
@@ -120,10 +127,41 @@ namespace ParallelAssemblyLineNET
                         }
                     });
 
+                    successOuter = false;
+                    while (!successOuter)
+                    {
+                        successOuter = runningTasks.TryAdd(nextToReadIndex, thisTask);
+                    }
+
                     nextToReadIndex++;
                 }
+                
+                List<Task> unfinishedTasks = new List<Task>();
+                // Remove already completed tasks from the runningTasks array
+                foreach (KeyValuePair<Int64,Task> taskToPossiblyRemove in runningTasks)
+                {
+                    if (taskToPossiblyRemove.Value.IsCompleted)
+                    {
+                        bool success = false;
+                        while (!success)
+                        {
+                            success = runningTasks.TryRemove(taskToPossiblyRemove.Key,out _);
+                        }
 
-                System.Threading.Thread.Sleep(mainLoopTimeOut);
+                    }
+                    else
+                    {
+                        unfinishedTasks.Add(taskToPossiblyRemove.Value);
+                    }
+                }
+
+                if(processedData.Count == 0 && unfinishedTasks.Count > 0)
+                {
+
+                    // This is smarter than a sleep because it won't wait a fixed time but just continue whenever at least one Task has finished. No use repeating the loop over and over while there's nothing new to process anyway.
+                    Task.WaitAny(unfinishedTasks.ToArray());
+                }
+                
             }
         }
 

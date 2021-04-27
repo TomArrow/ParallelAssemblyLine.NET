@@ -32,8 +32,10 @@ namespace ParallelAssemblyLineNET.Tests
                     {
                         return null;
                     }
-                }, (a,i) => { return a.ToString(); }, (a,i) => { resultArray[i] = a; }
-                );
+                }, 
+                (a,i) => { return a.ToString(); }, 
+                (a,i) => { resultArray[i] = a; }
+            );
 
             Assert.AreEqual(resultArray,referenceArray);
             //Assert.Pass();
