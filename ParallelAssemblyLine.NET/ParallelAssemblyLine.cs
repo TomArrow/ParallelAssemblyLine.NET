@@ -36,10 +36,10 @@ namespace ParallelAssemblyLineNET
         /// Start a new assembly line. The function finishes once the digester has been called and has finished for the last item.
         /// </summary>
         /// <param name="feeder">The feeder provides the source data which is to be processed. It will only get called single-threadedly and sequentially and provided with an incrementing number starting at zero. You can use this as an index. If you wish to indicate that there are no more items to provide, return null.</param>
-        /// <param name="chewer">The chewer receives the data that the feeder provided, but multiple chewers work on multiple items in parallel.</param>
-        /// <param name="digester">The digester receives, in sequential and single-threaded form, the output of the chewers. It can for example write this data sequentially into a file stream.</param>
+        /// <param name="chewer">The chewer receives the data that the feeder provided and the corresponding incrementing number. Multiple chewers work on multiple items in parallel and the output gets buffered..</param>
+        /// <param name="digester">The digester receives, in sequential and single-threaded form, the output of the chewers through the buffer and the corresponding incrementing number. It can for example write this data sequentially into a file stream.</param>
         /// <param name="options">Options to define finer points of the behavior of the behavior of this function</param>
-        public static void Assemble<TIn, TOut>(Func<Int64,FeederResult<TIn>> feeder,Func<TIn,Int64,TOut> chewer, Action<TOut,Int64> digester, ParallelAssemblyLineOptions options = null)
+        public static void Run<TIn, TOut>(Func<Int64,FeederResult<TIn>> feeder,Func<TIn,Int64,TOut> chewer, Action<TOut,Int64> digester, ParallelAssemblyLineOptions options = null)
         {
 
 
@@ -51,20 +51,21 @@ namespace ParallelAssemblyLineNET
             ConcurrentDictionary<Int64, bool> threadsRunning = new ConcurrentDictionary<long, bool>(); // A dictionary of threads that are still potentially running, indexed by the iterator.
             Dictionary<Int64, Task> runningTasks = new Dictionary<long, Task>(); // A dictionary of Tasks that may or may not still be running. Necessary to replace Thread.Sleep() with Task.WaitAny(). Doesn't have to be concurrent because only the main thread accesses it.
 
-            Int64 nextToReadIndex = 0;
+            Int64 nextToFeedIndex = 0;
             Int64 nextToDigestIndex = 0;
             bool allDataFed = false;
             bool allDataDigested = false;
             List<Task> unfinishedTasks;
             while (!allDataDigested)
             {
-
+                // Ending once done:
                 if (processedData.Count ==0 && threadsRunning.Count == 0 && allDataFed)
                 {
                     allDataDigested = true;
                     break;
                 }
 
+                // Digesting:
                 bool noMoreDataForWriting = false;
                 while (!noMoreDataForWriting && processedData.Count>0)
                 {
@@ -88,10 +89,10 @@ namespace ParallelAssemblyLineNET
                     }
                 }
 
-                // Only spawn new threads if buffer isn't full and full count of threads to run isn't exhausted.
-                while(!allDataFed && threadsRunning.Count < threadCount && processedData.Count < bufferSize)
+                // Feeding:
+                while(!allDataFed && threadsRunning.Count < threadCount && processedData.Count < bufferSize) // Only spawn new threads if buffer isn't full and full count of threads to run isn't exhausted.
                 {
-                    FeederResult<TIn> inputData = feeder(nextToReadIndex);
+                    FeederResult<TIn> inputData = feeder(nextToFeedIndex);
 
                     if(inputData == null)
                     {
@@ -102,12 +103,14 @@ namespace ParallelAssemblyLineNET
                     bool successOuter = false;
                     while (!successOuter)
                     {
-                        successOuter = threadsRunning.TryAdd(nextToReadIndex, true);
+                        successOuter = threadsRunning.TryAdd(nextToFeedIndex, true); 
                     }
                     
 
-                    Int64 localIndex = nextToReadIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
-                    runningTasks.Add(nextToReadIndex,Task.Run(()=> {
+                    Int64 localIndex = nextToFeedIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
+
+                    // Chewing:
+                    runningTasks.Add(nextToFeedIndex,Task.Run(()=> {
                         TOut processedDataHere = chewer(inputData, localIndex);
                         inputData = null;
                         bool success = false;
@@ -128,9 +131,11 @@ namespace ParallelAssemblyLineNET
                         }
                     }));
 
-                    nextToReadIndex++;
+                    nextToFeedIndex++;
                 }
                 
+
+                // Some maintenance/task management:
                 unfinishedTasks = new List<Task>();
                 // Remove already completed tasks from the runningTasks array
                 foreach (KeyValuePair<Int64,Task> taskToPossiblyRemove in runningTasks)
@@ -138,14 +143,12 @@ namespace ParallelAssemblyLineNET
                     if (taskToPossiblyRemove.Value.IsCompleted)
                     {
                         runningTasks.Remove(taskToPossiblyRemove.Key);
-
                     }
                     else
                     {
                         unfinishedTasks.Add(taskToPossiblyRemove.Value);
                     }
                 }
-
                 if(processedData.Count == 0 && unfinishedTasks.Count > 0)
                 {
 

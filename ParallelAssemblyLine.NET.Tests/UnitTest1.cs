@@ -24,7 +24,7 @@ namespace ParallelAssemblyLineNET.Tests
                 referenceArray[i] = testArray[i].ToString();
             }
 
-            ParallelAssemblyLine.Assemble<double, string>(
+            ParallelAssemblyLine.Run<double, string>(
                 (i) => {
                     if (i < testArray.Length)
                     {
@@ -65,7 +65,7 @@ namespace ParallelAssemblyLineNET.Tests
                 referenceArray[i] = testArray[i].ToString();
             }
 
-            ParallelAssemblyLine.Assemble<double, string>(
+            ParallelAssemblyLine.Run<double, string>(
                 (i) => {
                     if (i < testArray.Length)
                     {
