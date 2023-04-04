@@ -6,10 +6,6 @@ using System.Threading.Tasks;
 namespace ParallelAssemblyLineNET
 {
 
-    public class ParallelAssemblyLineOptions
-    {
-
-    }
 
     /// <summary>
     /// This class helps with quasi-assembly line style situations, in which your input data can only be provided sequentially and single-threadedly and digested (for example written into a file) also sequentially and single-threadedly, but where the processing steps in between can be multithreaded. This makes especially sense in situations where this processing in between is the bottleneck.
@@ -43,7 +39,7 @@ namespace ParallelAssemblyLineNET
         {
 
 
-            int threadCount = Environment.ProcessorCount;
+            int threadCount = (options != null && options.threadCount.HasValue) ? options.threadCount.Value : Environment.ProcessorCount;
             int bufferSize = threadCount * 2;
 
             ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>(); // This is the buffer for the processed data. We need to buffer because it might not get finished in correct order
