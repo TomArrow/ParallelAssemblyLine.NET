@@ -10,5 +10,6 @@ namespace ParallelAssemblyLineNET
     {
         public int? threadCount = null;
         public TaskCreationOptions threadCreationOptions = 0;
+        public bool? useNormalTaskScheduler = false;
     }
 }

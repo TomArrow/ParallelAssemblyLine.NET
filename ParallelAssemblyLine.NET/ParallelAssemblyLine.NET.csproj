@@ -10,6 +10,7 @@
     <RepositoryUrl>https://github.com/TomArrow/ParallelAssemblyLine.NET</RepositoryUrl>
     <Description>Multithreaded processing of data with single-threaded and sequential input data reading and output data writing.</Description>
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <RootNamespace>ParallelAssemblyLineNET</RootNamespace>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">

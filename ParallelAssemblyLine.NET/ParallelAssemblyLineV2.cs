@@ -41,10 +41,12 @@ namespace ParallelAssemblyLineNET
         public static void Run<TIn, TOut>(Func<Int64, FeederResult<TIn>> feeder, Func<TIn, Int64, TOut> chewer, Action<TOut, Int64> digester, ParallelAssemblyLineOptions options = null,Action<ParallelAssemblyLineStatus> statusCallback = null)
         {
 
+            bool useNormalTaskScheduler = options != null && options.useNormalTaskScheduler.HasValue && options.useNormalTaskScheduler.Value;
 
             int threadCount = (options != null && options.threadCount.HasValue) ? options.threadCount.Value : Environment.ProcessorCount;
             int bufferSize = threadCount * 2;
 
+            AutoResetEvent threadProcessItemResetEvent = new AutoResetEvent(false);
             AutoResetEvent inputDataResetEvent = new AutoResetEvent(false);
             AutoResetEvent processingResetEvent = new AutoResetEvent(false);
             AutoResetEvent digestingResetEvent = new AutoResetEvent(false);
@@ -52,7 +54,42 @@ namespace ParallelAssemblyLineNET
 
             ConcurrentDictionary<Int64, FeederResult<TIn>> inputData = new ConcurrentDictionary<long, FeederResult<TIn>>(); // This is the buffer for the input data.
             ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>(); // This is the buffer for the processed data. We need to buffer because it might not get finished in correct order
-            
+           
+            List<Thread> threads = new List<Thread>();
+            ConcurrentQueue<Action> itemsToProcess = new ConcurrentQueue<Action>();
+            bool everythingDone = false;
+            if (!useNormalTaskScheduler)
+            {
+                for(int i = 0; i < threadCount; i++)
+                {
+                    int localI = i;
+                    Thread newThread = new Thread(() =>
+                    {
+                        while (true)
+                        {
+                            if (everythingDone)
+                            {
+#if DEBUG
+                                Debug.WriteLine($"DEBUG: Processing thread #{localI} ended.");
+#endif
+                                return;
+                            }
+                            while(itemsToProcess.Count > 0)
+                            {
+                                Action actionToDo = null;
+                                if (itemsToProcess.TryDequeue(out actionToDo))
+                                {
+                                    actionToDo();
+                                }
+                            }
+                            threadProcessItemResetEvent.WaitOne();
+                        }
+                    });
+                    threads.Add(newThread);
+                    newThread.Start();
+                }
+            }
+
             //Int64 nextToDigestIndex = 0;
             //ool allDataProcessing = false;
 
@@ -151,7 +188,7 @@ namespace ParallelAssemblyLineNET
                         {
                             digestingResetEvent.Set();
 #if DEBUG
-                            Debug.WriteLine("DEBUG: Processing thread finished.");
+                            Debug.WriteLine("DEBUG: Processing scheduler thread finished.");
 #endif
                             return;
                         }
@@ -162,7 +199,8 @@ namespace ParallelAssemblyLineNET
                         Int64 localIndex = nextToProcessIndex; // Need to do this because otherwise the task will take the state of the more global variable and every thread will just access whatever.
 
                         // Chewing:
-                        Task thisTask = Task.Factory.StartNew(() => {
+                        //Task.Run(()=> {
+                        Action itemToDo = () => {
                             TOut processedDataHere = chewer(inputDataHere, localIndex);
                             inputDataHere = null;
                             bool success = false;
@@ -177,10 +215,21 @@ namespace ParallelAssemblyLineNET
                             Interlocked.Decrement(ref threadsRunning);
                             processingResetEvent.Set();
                             if (hasStatusCallback) statusResetEvent.Set();
-                        }, options != null ? options.threadCreationOptions : 0);
-                        thisTask.ContinueWith((e) => {
-                            throw new Exception("Processing task crashed. " + e.Exception.ToString());
-                        }, TaskContinuationOptions.OnlyOnFaulted);
+                        };
+                        if (!useNormalTaskScheduler)
+                        {
+                            itemsToProcess.Enqueue(itemToDo);
+                            threadProcessItemResetEvent.Set();
+                        }
+                        else{
+                            Task thisTask = Task.Factory.StartNew(itemToDo, options != null ? options.threadCreationOptions : 0);
+                            thisTask.ContinueWith((e) => {
+                                throw new Exception("Processing task crashed. " + e.Exception.ToString());
+                            }, TaskContinuationOptions.OnlyOnFaulted);
+                        }
+
+                        itemToDo = null;
+                        //});
 
                         nextToProcessIndex++;
                     }
@@ -235,13 +284,32 @@ namespace ParallelAssemblyLineNET
             feederTask.Wait();
             processingTask.Wait();
             digestTask.Wait();
-            if(statusTask != null)
+            if (!useNormalTaskScheduler)
+            {
+                everythingDone = true;
+                for(int i = 0; i < threadCount; i++)
+                {
+                    threadProcessItemResetEvent.Set();
+                }
+                for(int i = 0; i < threadCount; i++)
+                {
+                    threads[i].Join();
+                }
+            }
+            if (statusTask != null)
             {
                 statusCts.Cancel();
                 statusResetEvent.Set();
                 statusTask.Wait();
             }
-            
+            if (!useNormalTaskScheduler)
+            {
+                for (int i = 0; i < threadCount; i++)
+                {
+                    threads[i].Join();
+                }
+            }
+
         }
 
     }
