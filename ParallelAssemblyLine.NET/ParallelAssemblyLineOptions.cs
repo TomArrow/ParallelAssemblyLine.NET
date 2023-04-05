@@ -10,6 +10,7 @@ namespace ParallelAssemblyLineNET
     {
         public int? threadCount = null;
         public TaskCreationOptions threadCreationOptions = 0;
-        public bool? useNormalTaskScheduler = false;
+        public bool useNormalTaskScheduler = false;
+        public int? inputThreads = null; // If you want input to be parallel instead of sequential, define maximum amount of input threads here.
     }
 }

@@ -41,7 +41,10 @@ namespace ParallelAssemblyLineNET
         public static void Run<TIn, TOut>(Func<Int64, FeederResult<TIn>> feeder, Func<TIn, Int64, TOut> chewer, Action<TOut, Int64> digester, ParallelAssemblyLineOptions options = null,Action<ParallelAssemblyLineStatus> statusCallback = null)
         {
 
-            bool useNormalTaskScheduler = options != null && options.useNormalTaskScheduler.HasValue && options.useNormalTaskScheduler.Value;
+            bool useNormalTaskScheduler = options != null && options.useNormalTaskScheduler;
+            bool parallelInput = options != null && options.inputThreads.HasValue && options.inputThreads.Value > 1;
+            int inputThreads = (options != null && options.inputThreads.HasValue) ? options.inputThreads.Value : 1;
+
 
             int threadCount = (options != null && options.threadCount.HasValue) ? options.threadCount.Value : Environment.ProcessorCount;
             int bufferSize = threadCount * 2;
@@ -148,36 +151,91 @@ namespace ParallelAssemblyLineNET
 
 
             // Input thread
-            Task feederTask = Task.Factory.StartNew(() => {
-                while (true)
-                {
-                    while (inputData.Count < bufferSize)
+            Task feederTask = null;
+            if (parallelInput)
+            {
+                Int64 activeInputThreads = 0;
+                Mutex lastItemIndexMutex = new Mutex(false);
+                bool parallelInputEndFound = false;
+                feederTask = Task.Factory.StartNew(() => {
+                    while (true)
                     {
-                        FeederResult<TIn> inputHere = feeder(nextToFeedIndex);
-                        bool success = false;
-                        while (!success)
+                        if (parallelInputEndFound) return;
+                        while (inputData.Count < bufferSize && Interlocked.Read(ref activeInputThreads) < inputThreads)
                         {
-                            success = inputData.TryAdd(nextToFeedIndex, inputHere);
-                        }
-                        processingResetEvent.Set();
-                        if(hasStatusCallback) statusResetEvent.Set();
-                        if (inputHere == null)
-                        {
-                            lastItemIndex = nextToFeedIndex - 1;
-                            digestingResetEvent.Set();
+                            Interlocked.Increment(ref activeInputThreads);
+                            Int64 nextFeedIndexLocal = nextToFeedIndex;
+                            Task.Run(()=> {
+                                FeederResult<TIn> inputHere = feeder(nextFeedIndexLocal);
+                                bool success = false;
+                                while (!success)
+                                {
+                                    success = inputData.TryAdd(nextFeedIndexLocal, inputHere);
+                                }
+                                processingResetEvent.Set();
+                                if (hasStatusCallback) statusResetEvent.Set();
+                                Interlocked.Decrement(ref activeInputThreads);
+                                if (inputHere == null)
+                                {
+                                    parallelInputEndFound = true;
+                                    lock (lastItemIndexMutex)
+                                    {
+                                        if(lastItemIndex == -2)
+                                        {
+
+                                            lastItemIndex = nextFeedIndexLocal - 1;
+                                        } else
+                                        {
+                                            lastItemIndex = Math.Min(nextFeedIndexLocal - 1, lastItemIndex);
+                                        }
+                                    }
+                                    digestingResetEvent.Set();
 #if DEBUG
-                            Debug.WriteLine("DEBUG: Feeding finished.");
+                                    Debug.WriteLine("DEBUG: Feeding possible end found (parallel).");
 #endif
-                            return;
+                                }
+                                inputDataResetEvent.Set();
+                            });
+                            
+                            nextToFeedIndex++;
                         }
-                        nextToFeedIndex++;
+                        inputDataResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
                     }
-                    inputDataResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
-                }
-            }, TaskCreationOptions.LongRunning);
-            feederTask.ContinueWith((e)=> {
-                throw new Exception("Feeder crashed. "+e.Exception.ToString());
-            },TaskContinuationOptions.OnlyOnFaulted);
+                }, TaskCreationOptions.LongRunning);
+            } else
+            {
+
+                feederTask = Task.Factory.StartNew(() => {
+                    while (true)
+                    {
+                        while (inputData.Count < bufferSize)
+                        {
+                            FeederResult<TIn> inputHere = feeder(nextToFeedIndex);
+                            bool success = false;
+                            while (!success)
+                            {
+                                success = inputData.TryAdd(nextToFeedIndex, inputHere);
+                            }
+                            processingResetEvent.Set();
+                            if (hasStatusCallback) statusResetEvent.Set();
+                            if (inputHere == null)
+                            {
+                                lastItemIndex = nextToFeedIndex - 1;
+                                digestingResetEvent.Set();
+#if DEBUG
+                                Debug.WriteLine("DEBUG: Feeding finished.");
+#endif
+                                return;
+                            }
+                            nextToFeedIndex++;
+                        }
+                        inputDataResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
+                    }
+                }, TaskCreationOptions.LongRunning);
+            }
+            feederTask.ContinueWith((e) => {
+                throw new Exception("Feeder crashed. " + e.Exception.ToString());
+            }, TaskContinuationOptions.OnlyOnFaulted);
 
             // Processing thread.
             Task processingTask = Task.Factory.StartNew(() => {

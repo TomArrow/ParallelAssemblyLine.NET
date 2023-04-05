@@ -326,6 +326,60 @@ namespace ParallelAssemblyLineNET.Tests
             //Assert.Pass();
         }
         [Test]
+        public void V2SimpleButLongerFunctionalityLongRunningWithRandomDelayParallelInputTest()
+        {
+            int countOfItemsToTest = 2000;
+            
+            Random rnd = new Random();
+
+            double[] testArray = new double[countOfItemsToTest];
+            int[,] timesToWait = new int[countOfItemsToTest, 3];
+
+            for (int i = 0; i < countOfItemsToTest; i++)
+            {
+                testArray[i] = rnd.NextDouble();
+                timesToWait[i, 0] =  rnd.Next(0,3);
+                timesToWait[i, 1] = rnd.Next(0,50);
+                timesToWait[i, 2] = rnd.Next(0,1);
+            }
+
+
+            string[] resultArray = new string[testArray.Length];
+            string[] referenceArray = new string[testArray.Length];
+
+            for(int i = 0; i < referenceArray.Length; i++)
+            {
+                referenceArray[i] = testArray[i].ToString();
+            }
+
+            ParallelAssemblyLineV2.Run<double, string>(
+                (i) => {
+                    if (i < testArray.Length)
+                    {
+                        System.Threading.Thread.Sleep(timesToWait[i, 0]);
+                        return testArray[(int)i];
+                    } else
+                    {
+                        return null;
+                    }
+
+                }, 
+                (a,i) => {
+                    System.Threading.Thread.Sleep(timesToWait[i, 1]);
+                    return a.ToString();
+                }, 
+                (a,i) => {
+                    System.Threading.Thread.Sleep(timesToWait[i, 2]);
+                    resultArray[i] = a; 
+                }
+            ,new ParallelAssemblyLineOptions() { threadCreationOptions = TaskCreationOptions.LongRunning,inputThreads=8 }, (status) => {
+                TestContext.WriteLine($"inbuf: {status.InputBufferSize},outbuf: {status.OutputBufferSize},finished: {status.DigestedItems},active: {status.ProcessingItems}\n");
+            });
+
+            Assert.AreEqual(referenceArray, resultArray);
+            //Assert.Pass();
+        }
+        [Test]
         public void V2SimpleButLongerFunctionalityLongRunningWithRandomDelayMoreThreadsTest()
         {
             int countOfItemsToTest = 2000;
