@@ -47,6 +47,7 @@ namespace ParallelAssemblyLineNET
             int bufferSize = threadCount * 2;
 
             AutoResetEvent threadProcessItemResetEvent = new AutoResetEvent(false);
+            //Semaphore threadProcessItemSemaphore = new Semaphore(0, threadCount);
             AutoResetEvent inputDataResetEvent = new AutoResetEvent(false);
             AutoResetEvent processingResetEvent = new AutoResetEvent(false);
             AutoResetEvent digestingResetEvent = new AutoResetEvent(false);
@@ -72,6 +73,12 @@ namespace ParallelAssemblyLineNET
 #if DEBUG
                                 Debug.WriteLine($"DEBUG: Processing thread #{localI} ended.");
 #endif
+                                threadProcessItemResetEvent.Set(); // This hasn't actually been a problem but just to be 100% safe and have a logically 100% reliable system.
+                                // Why? In theory by the time threadProcessItemResetEvent.Set(); is being called at the end of Run<T>(...) in a for loop,
+                                // not all threads may have arrived at the .WaitOne() part yet. This is extremely unlikely and has never happened in hundreds
+                                // of unit tests, but in theory it's not guaranteed to not happen. And if at least 2 threads were to not have been at .WaitOne() yet,
+                                // 2 of the .Set() calls would only allow 1 of the 2 threads to finish and end. Thus we would be stuck in a deadlock at the end.
+                                // So just to be 100% safe, I'm calling .Set() here again in case there's any other thread left that needs it.
                                 return;
                             }
                             while(itemsToProcess.Count > 0)
@@ -82,7 +89,12 @@ namespace ParallelAssemblyLineNET
                                     actionToDo();
                                 }
                             }
+                            //threadProcessItemSemaphore.WaitOne();
                             threadProcessItemResetEvent.WaitOne();
+                            if (itemsToProcess.Count > 1)
+                            {
+                                threadProcessItemResetEvent.Set(); // Alllow another thread to help
+                            }
                         }
                     });
                     threads.Add(newThread);
@@ -219,6 +231,7 @@ namespace ParallelAssemblyLineNET
                         if (!useNormalTaskScheduler)
                         {
                             itemsToProcess.Enqueue(itemToDo);
+                            //threadProcessItemSemaphore.Release();
                             threadProcessItemResetEvent.Set();
                         }
                         else{
@@ -287,11 +300,12 @@ namespace ParallelAssemblyLineNET
             if (!useNormalTaskScheduler)
             {
                 everythingDone = true;
+                //threadProcessItemSemaphore.Release(threadCount);
                 for(int i = 0; i < threadCount; i++)
                 {
                     threadProcessItemResetEvent.Set();
                 }
-                for(int i = 0; i < threadCount; i++)
+                for (int i = 0; i < threadCount; i++)
                 {
                     threads[i].Join();
                 }
