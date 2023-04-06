@@ -38,12 +38,14 @@ namespace ParallelAssemblyLineNET
         /// <param name="chewer">The chewer receives the data that the feeder provided and the corresponding incrementing number. Multiple chewers work on multiple items in parallel and the output gets buffered..</param>
         /// <param name="digester">The digester receives, in sequential and single-threaded form, the output of the chewers through the buffer and the corresponding incrementing number. It can for example write this data sequentially into a file stream.</param>
         /// <param name="options">Options to define finer points of the behavior of the behavior of this function</param>
-        public static void Run<TIn, TOut>(Func<Int64, FeederResult<TIn>> feeder, Func<TIn, Int64, TOut> chewer, Action<TOut, Int64> digester, ParallelAssemblyLineOptions options = null,Action<ParallelAssemblyLineStatus> statusCallback = null)
+        public static void Run<TIn, TOut>(Func<Int64, FeederResult<TIn>> feeder, Func<TIn, Int64, TOut> chewer, Action<TOut, Int64> digester, ParallelAssemblyLineOptions options = null, Action<ParallelAssemblyLineStatus> statusCallback = null)
         {
 
             bool useNormalTaskScheduler = options != null && options.useNormalTaskScheduler;
             bool parallelInput = options != null && options.inputThreads.HasValue && options.inputThreads.Value > 1;
             int inputThreads = (options != null && options.inputThreads.HasValue) ? options.inputThreads.Value : 1;
+            bool parallelOutput = options != null && options.outputThreads.HasValue && options.outputThreads.Value > 1;
+            int outputThreads = (options != null && options.outputThreads.HasValue) ? options.outputThreads.Value : 1;
 
 
             int threadCount = (options != null && options.threadCount.HasValue) ? options.threadCount.Value : Environment.ProcessorCount;
@@ -58,13 +60,13 @@ namespace ParallelAssemblyLineNET
 
             ConcurrentDictionary<Int64, FeederResult<TIn>> inputData = new ConcurrentDictionary<long, FeederResult<TIn>>(); // This is the buffer for the input data.
             ConcurrentDictionary<Int64, TOut> processedData = new ConcurrentDictionary<long, TOut>(); // This is the buffer for the processed data. We need to buffer because it might not get finished in correct order
-           
+
             List<Thread> threads = new List<Thread>();
             ConcurrentQueue<Action> itemsToProcess = new ConcurrentQueue<Action>();
             bool everythingDone = false;
             if (!useNormalTaskScheduler)
             {
-                for(int i = 0; i < threadCount; i++)
+                for (int i = 0; i < threadCount; i++)
                 {
                     int localI = i;
                     Thread newThread = new Thread(() =>
@@ -84,7 +86,7 @@ namespace ParallelAssemblyLineNET
                                 // So just to be 100% safe, I'm calling .Set() here again in case there's any other thread left that needs it.
                                 return;
                             }
-                            while(itemsToProcess.Count > 0)
+                            while (itemsToProcess.Count > 0)
                             {
                                 Action actionToDo = null;
                                 if (itemsToProcess.TryDequeue(out actionToDo))
@@ -124,7 +126,7 @@ namespace ParallelAssemblyLineNET
             CancellationToken statusCt = statusCts.Token;
             Task statusTask = null;
             bool hasStatusCallback = false;
-            if(statusCallback != null)
+            if (statusCallback != null)
             {
                 statusTask = Task.Factory.StartNew(() => {
                     while (true)
@@ -140,7 +142,7 @@ namespace ParallelAssemblyLineNET
                         status.ProcessedItems = processedItemsCount;
                         status.DigestedItems = nextToDigestIndex;
                         statusCallback(status);
-                        statusResetEvent.WaitOne(); 
+                        statusResetEvent.WaitOne();
                     }
                 }, TaskCreationOptions.LongRunning);
                 statusTask.ContinueWith((e) => {
@@ -165,7 +167,7 @@ namespace ParallelAssemblyLineNET
                         {
                             Interlocked.Increment(ref activeInputThreads);
                             Int64 nextFeedIndexLocal = nextToFeedIndex;
-                            Task.Run(()=> {
+                            Task.Run(() => {
                                 FeederResult<TIn> inputHere = feeder(nextFeedIndexLocal);
                                 bool success = false;
                                 while (!success)
@@ -180,7 +182,7 @@ namespace ParallelAssemblyLineNET
                                     parallelInputEndFound = true;
                                     lock (lastItemIndexMutex)
                                     {
-                                        if(lastItemIndex == -2)
+                                        if (lastItemIndex == -2)
                                         {
 
                                             lastItemIndex = nextFeedIndexLocal - 1;
@@ -196,7 +198,7 @@ namespace ParallelAssemblyLineNET
                                 }
                                 inputDataResetEvent.Set();
                             });
-                            
+
                             nextToFeedIndex++;
                         }
                         inputDataResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
@@ -292,7 +294,7 @@ namespace ParallelAssemblyLineNET
                             //threadProcessItemSemaphore.Release();
                             threadProcessItemResetEvent.Set();
                         }
-                        else{
+                        else {
                             Task thisTask = Task.Factory.StartNew(itemToDo, options != null ? options.threadCreationOptions : 0);
                             thisTask.ContinueWith((e) => {
                                 throw new Exception("Processing task crashed. " + e.Exception.ToString());
@@ -313,40 +315,89 @@ namespace ParallelAssemblyLineNET
             }, TaskContinuationOptions.OnlyOnFaulted);
 
             // Digester thread
-            Task digestTask = Task.Factory.StartNew(() => {
-                while (true)
-                {
-                    if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex)
-                    {
-#if DEBUG
-                        Debug.WriteLine("DEBUG: Digesting finished, before while.");
-#endif
-                        return;
-                    }
-                    while (processedData.ContainsKey(nextToDigestIndex))
-                    {
-                        TOut outputDataHere = default(TOut);
-                        bool success = false;
-                        while (!success)
-                        {
-                            success = processedData.TryRemove(nextToDigestIndex, out outputDataHere);
-                        }
-                        processingResetEvent.Set();
-                        if (hasStatusCallback) statusResetEvent.Set();
+            Task digestTask = null;
+            if (parallelOutput)
+            {
 
-                        digester(outputDataHere, nextToDigestIndex);
-                        nextToDigestIndex++;
-                        if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex) // Sadly doubled here 
+                Int64 outputThreadsActive = 0;
+                digestTask = Task.Factory.StartNew(() => {
+                    while (true)
+                    {
+                        if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex && Interlocked.Read(ref outputThreadsActive) == 0)
                         {
 #if DEBUG
-                            Debug.WriteLine("DEBUG: Digesting finished, in while.");
+                            Debug.WriteLine("DEBUG: Digesting finished, before while.");
 #endif
                             return;
                         }
+                        while (processedData.ContainsKey(nextToDigestIndex) && Interlocked.Read(ref outputThreadsActive) < outputThreads)
+                        {
+                            Interlocked.Increment(ref outputThreadsActive);
+                            Int64 localNextDigestIndex = nextToDigestIndex;
+                            Task.Run(()=> {
+                                TOut outputDataHere = default(TOut);
+                                bool success = false;
+                                while (!success)
+                                {
+                                    success = processedData.TryRemove(localNextDigestIndex, out outputDataHere);
+                                }
+                                processingResetEvent.Set();
+                                if (hasStatusCallback) statusResetEvent.Set();
+
+                                digester(outputDataHere, localNextDigestIndex);
+                                Interlocked.Decrement(ref outputThreadsActive);
+                                digestingResetEvent.Set();
+                            });
+                            nextToDigestIndex++;
+                            if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex && Interlocked.Read(ref outputThreadsActive) == 0) // Sadly doubled here 
+                            {
+#if DEBUG
+                                Debug.WriteLine("DEBUG: Digesting finished, in while.");
+#endif
+                                return;
+                            }
+                        }
+                        digestingResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
                     }
-                    digestingResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
-                }
-            }, TaskCreationOptions.LongRunning);
+                }, TaskCreationOptions.LongRunning);
+
+            } else
+            {
+                digestTask = Task.Factory.StartNew(() => {
+                    while (true)
+                    {
+                        if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex)
+                        {
+#if DEBUG
+                            Debug.WriteLine("DEBUG: Digesting finished, before while.");
+#endif
+                            return;
+                        }
+                        while (processedData.ContainsKey(nextToDigestIndex))
+                        {
+                            TOut outputDataHere = default(TOut);
+                            bool success = false;
+                            while (!success)
+                            {
+                                success = processedData.TryRemove(nextToDigestIndex, out outputDataHere);
+                            }
+                            processingResetEvent.Set();
+                            if (hasStatusCallback) statusResetEvent.Set();
+
+                            digester(outputDataHere, nextToDigestIndex);
+                            nextToDigestIndex++;
+                            if (lastItemIndex != -2 && nextToDigestIndex > lastItemIndex) // Sadly doubled here 
+                            {
+#if DEBUG
+                                Debug.WriteLine("DEBUG: Digesting finished, in while.");
+#endif
+                                return;
+                            }
+                        }
+                        digestingResetEvent.WaitOne(); // Wait until some of the input data has been removed from the input buffer.
+                    }
+                }, TaskCreationOptions.LongRunning);
+            }
             digestTask.ContinueWith((e) => {
                 throw new Exception("Digester crashed. " + e.Exception.ToString());
             }, TaskContinuationOptions.OnlyOnFaulted);
